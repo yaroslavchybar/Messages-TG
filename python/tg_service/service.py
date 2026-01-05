@@ -14,6 +14,7 @@ from .convex_sync import sync_message
 from .dialogs import fetch_messages as fetch_messages_impl
 from .dialogs import get_dialogs as get_dialogs_impl
 from .handlers import register_handlers
+from .persistent_queue import PersistentQueue
 from .protocol import write_notification
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class TelegramService:
         self.api_hash = api_hash
         self.convex_url = convex_url
         self.clients: dict[str, TelegramClient] = {}
+        self._session_strings: dict[str, str] = {}
         self.pending_logins: dict[str, dict] = {}
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(20.0),
@@ -33,9 +35,14 @@ class TelegramService:
         self._sync_queue: asyncio.Queue[dict] | None = None
         self._sync_worker_tasks: set[asyncio.Task] = set()
         self._last_sync_queue_full_ts = 0.0
+        self._persistent_queue = PersistentQueue()
+        self._persistent_queue_worker_task: asyncio.Task | None = None
+        self._last_persistent_queue_notice_ts = 0.0
         self._account_settings: dict[str, dict] = {}
         self._account_settings_refresh_tasks: dict[str, asyncio.Task] = {}
         self._last_settings_refresh_error_ts: dict[str, float] = {}
+        self._disconnect_watch_tasks: dict[str, asyncio.Task] = {}
+        self._handlers_registered: set[str] = set()
 
     def get_account_message_filters(self, account_id: str) -> dict[str, bool]:
         settings = self._account_settings.get(account_id) or {}
@@ -73,11 +80,124 @@ class TelegramService:
             return
 
         async def _run() -> None:
-            while True:
+            while account_id in self.clients:
                 await self._refresh_account_settings(account_id)
                 await asyncio.sleep(30)
 
         self._account_settings_refresh_tasks[account_id] = loop.create_task(_run())
+
+    def _ensure_disconnect_watch_task(self, account_id: str, client: TelegramClient) -> None:
+        if account_id in self._disconnect_watch_tasks:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _run() -> None:
+            while True:
+                if account_id not in self.clients:
+                    return
+                if self.clients.get(account_id) is not client:
+                    return
+
+                try:
+                    await client.disconnected
+                except Exception:
+                    pass
+
+                if account_id not in self.clients:
+                    return
+                if self.clients.get(account_id) is not client:
+                    return
+
+                self._write_notification({
+                    "type": "log",
+                    "message": f"Disconnected {account_id[:8]}, reconnecting...",
+                })
+
+                await self._reconnect_client(account_id)
+
+        self._disconnect_watch_tasks[account_id] = loop.create_task(_run())
+
+    async def _reconnect_client(self, account_id: str, max_attempts: int = 5) -> None:
+        session_string = self._session_strings.get(account_id)
+        if not session_string:
+            return
+
+        client = self.clients.get(account_id)
+        created_new_client = False
+        if client is None:
+            client = TelegramClient(StringSession(session_string), self.api_id, self.api_hash)
+            self.clients[account_id] = client
+            created_new_client = True
+
+        for attempt in range(max_attempts):
+            if account_id not in self.clients:
+                return
+
+            try:
+                await asyncio.sleep(2 ** attempt)
+
+                if not client.is_connected():
+                    await client.connect()
+
+                if not await client.is_user_authorized():
+                    self._write_notification({
+                        "type": "error",
+                        "message": f"Session expired for {account_id[:8]}",
+                    })
+                    return
+
+                await self._refresh_account_settings(account_id)
+                self._ensure_account_settings_refresh_task(account_id)
+                self._ensure_disconnect_watch_task(account_id, client)
+                if created_new_client and account_id not in self._handlers_registered:
+                    await register_handlers(self, client, account_id)
+                    self._handlers_registered.add(account_id)
+                self._write_notification({
+                    "type": "log",
+                    "message": f"Reconnected {account_id[:8]}",
+                })
+                return
+            except Exception as e:
+                self._write_notification({
+                    "type": "error",
+                    "message": f"Reconnect attempt {attempt + 1} failed: {str(e)[:30]}",
+                })
+
+        self._write_notification({
+            "type": "error",
+            "message": f"Failed to reconnect {account_id[:8]} after {max_attempts} attempts",
+        })
+
+    async def _refresh_account_settings_sync(self, account_id: str) -> bool:
+        if not self.convex_url:
+            return False
+        try:
+            resp = await self.http_client.post(
+                f"{self.convex_url}/api/query",
+                json={
+                    "path": "accounts:get",
+                    "args": {"accountId": account_id},
+                },
+            )
+            if resp.status_code != 200:
+                return False
+
+            body = resp.json()
+            value = None
+            if isinstance(body, dict) and body.get("status") == "success":
+                value = body.get("value")
+            elif isinstance(body, dict):
+                value = body.get("value")
+
+            if isinstance(value, dict):
+                self._account_settings[account_id] = value
+                return True
+            return False
+        except Exception:
+            return False
 
     async def _refresh_account_settings(self, account_id: str) -> None:
         if not self.convex_url:
@@ -130,6 +250,9 @@ class TelegramService:
                 task = loop.create_task(self._sync_worker())
                 self._sync_worker_tasks.add(task)
 
+        if self._persistent_queue_worker_task is None:
+            self._persistent_queue_worker_task = loop.create_task(self._persistent_queue_worker())
+
     def enqueue_sync_message(self, payload: dict) -> bool:
         self.ensure_sync_workers()
         if self._sync_queue is None:
@@ -138,14 +261,35 @@ class TelegramService:
             self._sync_queue.put_nowait(payload)
             return True
         except asyncio.QueueFull:
+            self._persistent_queue.write(payload)
             now = time.monotonic()
-            if (now - self._last_sync_queue_full_ts) >= 5:
-                self._last_sync_queue_full_ts = now
+            if (now - self._last_persistent_queue_notice_ts) >= 5:
+                self._last_persistent_queue_notice_ts = now
                 self._write_notification({
-                    "type": "error",
-                    "message": "Sync queue full; dropping messages",
+                    "type": "log",
+                    "message": "Queue full, buffering to disk",
                 })
-            return False
+            return True
+
+    async def _persistent_queue_worker(self) -> None:
+        while True:
+            if self._sync_queue is None:
+                await asyncio.sleep(1)
+                continue
+
+            items = self._persistent_queue.read_all()
+            if not items:
+                await asyncio.sleep(1)
+                continue
+
+            filename, payload = items[0]
+            try:
+                self._sync_queue.put_nowait(payload)
+                self._persistent_queue.delete(filename)
+            except asyncio.QueueFull:
+                await asyncio.sleep(1)
+            except Exception:
+                await asyncio.sleep(1)
 
     async def _sync_worker(self) -> None:
         if self._sync_queue is None:
@@ -178,6 +322,20 @@ class TelegramService:
 
             await asyncio.gather(*self._sync_worker_tasks, return_exceptions=True)
             self._sync_worker_tasks.clear()
+
+        if self._persistent_queue_worker_task is not None:
+            self._persistent_queue_worker_task.cancel()
+            try:
+                await self._persistent_queue_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._persistent_queue_worker_task = None
+
+        for task in list(self._disconnect_watch_tasks.values()):
+            task.cancel()
+        if self._disconnect_watch_tasks:
+            await asyncio.gather(*self._disconnect_watch_tasks.values(), return_exceptions=True)
+            self._disconnect_watch_tasks.clear()
 
     async def login(self, phone: str, account_id: str) -> dict:
         session = StringSession()
@@ -226,6 +384,7 @@ class TelegramService:
         session_string = client.session.save()
 
         self.clients[account_id] = client
+        self._session_strings[account_id] = session_string
         del self.pending_logins[account_id]
 
         self._write_notification({
@@ -233,10 +392,17 @@ class TelegramService:
             "message": f"Logged in as {me.first_name or me.username or 'Unknown'}",
         })
 
-        await self._refresh_account_settings(account_id)
+        settings_loaded = await self._refresh_account_settings_sync(account_id)
+        if not settings_loaded:
+            self._write_notification({
+                "type": "log",
+                "message": f"Using default settings for {account_id[:8]}",
+            })
         self._ensure_account_settings_refresh_task(account_id)
+        self._ensure_disconnect_watch_task(account_id, client)
 
         await register_handlers(self, client, account_id)
+        self._handlers_registered.add(account_id)
 
         name = ""
         if isinstance(me, User):
@@ -258,10 +424,18 @@ class TelegramService:
 
         me = await client.get_me()
         self.clients[account_id] = client
+        self._session_strings[account_id] = session_string
 
-        await self._refresh_account_settings(account_id)
+        settings_loaded = await self._refresh_account_settings_sync(account_id)
+        if not settings_loaded:
+            self._write_notification({
+                "type": "log",
+                "message": f"Using default settings for {account_id[:8]}",
+            })
         self._ensure_account_settings_refresh_task(account_id)
+        self._ensure_disconnect_watch_task(account_id, client)
         await register_handlers(self, client, account_id)
+        self._handlers_registered.add(account_id)
 
         name = ""
         if isinstance(me, User):
@@ -279,7 +453,20 @@ class TelegramService:
             task = self._account_settings_refresh_tasks.pop(account_id, None)
             if task is not None:
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            watch_task = self._disconnect_watch_tasks.pop(account_id, None)
+            if watch_task is not None:
+                watch_task.cancel()
+                try:
+                    await watch_task
+                except asyncio.CancelledError:
+                    pass
             await client.disconnect()
+            self._session_strings.pop(account_id, None)
+            self._handlers_registered.discard(account_id)
             return {"success": True}
         return {"success": False, "error": "Client not found"}
 

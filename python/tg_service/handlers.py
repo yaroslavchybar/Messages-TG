@@ -117,7 +117,10 @@ async def handle_new_message(service, event, account_id: str) -> None:
         })
 
     except Exception as e:
+        import traceback
+
+        logger.error(f"Message handler error: {traceback.format_exc()}")
         service._write_notification({
             "type": "error",
-            "message": str(e),
+            "message": f"Handler error: {type(e).__name__}: {str(e)[:40]}",
         })

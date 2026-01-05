@@ -1,10 +1,13 @@
 import { spawn, ChildProcess } from 'child_process';
-import { useRef, useEffect, useMemo } from 'react';
+import { useRef, useEffect, useMemo, useCallback } from 'react';
 import { createInterface, Interface } from 'readline';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const MAX_RESTART_ATTEMPTS = 5;
+const INITIAL_BACKOFF_MS = 1000;
 
 export interface TelegramBridge {
     login: (phone: string, accountId: string) => Promise<any>;
@@ -30,22 +33,42 @@ export interface TelegramBridge {
     onNotification: (callback: (notification: any) => void) => void;
 }
 
+type PendingEntry = {
+    resolve: Function;
+    reject: Function;
+    timeoutId: ReturnType<typeof setTimeout>;
+};
+
 export function useTelegramBridge(): TelegramBridge {
     const processRef = useRef<ChildProcess | null>(null);
     const rlRef = useRef<Interface | null>(null);
-    const pendingRef = useRef<Map<number, { resolve: Function; reject: Function }>>(new Map());
+    const pendingRef = useRef<Map<number, PendingEntry>>(new Map());
     const idRef = useRef(0);
     const notificationCallbackRef = useRef<((notification: any) => void) | null>(null);
     const startedRef = useRef(false);
+    const stopRequestedRef = useRef(false);
+    const restartAttemptsRef = useRef(0);
+    const backoffRef = useRef(INITIAL_BACKOFF_MS);
+    const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    useEffect(() => {
-        if (startedRef.current) return;
-        startedRef.current = true;
+    const closeReadline = () => {
+        if (rlRef.current) {
+            rlRef.current.close();
+            rlRef.current = null;
+        }
+    };
 
-        // Path to Python service
+    const rejectAllPending = (error: string) => {
+        pendingRef.current.forEach(({ reject, timeoutId }) => {
+            clearTimeout(timeoutId);
+            reject(new Error(error));
+        });
+        pendingRef.current.clear();
+    };
+
+    const startPythonProcess = useCallback(() => {
         const pythonScript = path.resolve(__dirname, '../../python/telegram_service.py');
 
-        // Spawn Python process
         const proc = spawn('python', [pythonScript], {
             stdio: ['pipe', 'pipe', 'inherit'],
             env: { ...process.env },
@@ -59,12 +82,36 @@ export function useTelegramBridge(): TelegramBridge {
         });
 
         proc.on('exit', (code) => {
+            closeReadline();
+            processRef.current = null;
+
+            if (stopRequestedRef.current) return;
+
             if (code !== 0 && code !== null) {
-                console.error(`Python process exited with code ${code}`);
+                rejectAllPending('Python process crashed');
+
+                notificationCallbackRef.current?.({
+                    type: 'error',
+                    message: 'Backend disconnected, attempting reconnect...',
+                });
+
+                if (restartAttemptsRef.current < MAX_RESTART_ATTEMPTS) {
+                    restartAttemptsRef.current++;
+                    const delay = backoffRef.current;
+                    restartTimeoutRef.current = setTimeout(() => {
+                        if (stopRequestedRef.current) return;
+                        startPythonProcess();
+                        backoffRef.current = Math.min(backoffRef.current * 2, 30000);
+                    }, delay);
+                } else {
+                    notificationCallbackRef.current?.({
+                        type: 'error',
+                        message: 'Failed to restart backend after 5 attempts',
+                    });
+                }
             }
         });
 
-        // Set up readline for stdout
         if (proc.stdout) {
             const rl = createInterface({ input: proc.stdout });
             rlRef.current = rl;
@@ -73,15 +120,19 @@ export function useTelegramBridge(): TelegramBridge {
                 try {
                     const response = JSON.parse(line);
 
-                    // Handle notifications (no id field)
+                    if (restartAttemptsRef.current !== 0) {
+                        restartAttemptsRef.current = 0;
+                        backoffRef.current = INITIAL_BACKOFF_MS;
+                    }
+
                     if (response.method === 'notification' && notificationCallbackRef.current) {
                         notificationCallbackRef.current(response.params);
                         return;
                     }
 
-                    // Handle RPC responses
                     const pending = pendingRef.current.get(response.id);
                     if (pending) {
+                        clearTimeout(pending.timeoutId);
                         pendingRef.current.delete(response.id);
                         if (response.error) {
                             pending.reject(new Error(response.error.message));
@@ -89,50 +140,69 @@ export function useTelegramBridge(): TelegramBridge {
                             pending.resolve(response.result);
                         }
                     }
-                } catch (e) {
-                    // Ignore parse errors for non-JSON output
+                } catch {
+                    return;
                 }
             });
         }
 
+        return proc;
+    }, []);
+
+    useEffect(() => {
+        if (startedRef.current) return;
+        startedRef.current = true;
+
+        stopRequestedRef.current = false;
+        startPythonProcess();
+
         return () => {
-            if (rlRef.current) {
-                rlRef.current.close();
+            stopRequestedRef.current = true;
+            if (restartTimeoutRef.current) {
+                clearTimeout(restartTimeoutRef.current);
+                restartTimeoutRef.current = null;
             }
+            rejectAllPending('Bridge closed');
+            closeReadline();
             if (processRef.current) {
                 processRef.current.kill();
+                processRef.current = null;
             }
         };
-    }, []);
+    }, [startPythonProcess]);
 
     const call = async (method: string, params: Record<string, any> = {}): Promise<any> => {
         return new Promise((resolve, reject) => {
             const id = ++idRef.current;
             const request = JSON.stringify({ jsonrpc: '2.0', method, params, id }) + '\n';
 
-            pendingRef.current.set(id, { resolve, reject });
-
-            if (processRef.current?.stdin) {
-                processRef.current.stdin.write(request);
-            } else {
-                reject(new Error('Python process not started'));
-            }
-
-            // Timeout after 60 seconds
-            setTimeout(() => {
+            const timeoutId = setTimeout(() => {
                 if (pendingRef.current.has(id)) {
                     pendingRef.current.delete(id);
                     reject(new Error('Request timeout'));
                 }
-            }, 60000);
+            }, 15000);
+
+            pendingRef.current.set(id, { resolve, reject, timeoutId });
+
+            if (processRef.current?.stdin) {
+                processRef.current.stdin.write(request);
+            } else {
+                clearTimeout(timeoutId);
+                pendingRef.current.delete(id);
+                reject(new Error('Python process not started'));
+            }
         });
     };
 
     const cleanup = () => {
-        if (rlRef.current) {
-            rlRef.current.close();
-            rlRef.current = null;
+        stopRequestedRef.current = true;
+        if (restartTimeoutRef.current) {
+            clearTimeout(restartTimeoutRef.current);
+            restartTimeoutRef.current = null;
         }
+        rejectAllPending('Bridge closed');
+        closeReadline();
         if (processRef.current) {
             processRef.current.kill();
             processRef.current = null;

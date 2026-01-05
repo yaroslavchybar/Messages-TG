@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, createContext, useContext } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import Gradient from 'ink-gradient';
 import { LoginScreen } from './LoginScreen';
@@ -56,22 +56,27 @@ function interpolateColor(color1: string, color2: string, factor: number): strin
     return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
-// Shared animation phase for synchronized gradient animation
-let globalPhase = 0;
-setInterval(() => {
-    globalPhase = (globalPhase + 0.05) % (Math.PI * 2);
-}, 50);
+const AnimationContext = createContext<{ phase: number }>({ phase: 0 });
 
-// Hook for animated gradient colors
-function useGradientColors(): string[] {
-    const [phase, setPhase] = useState(globalPhase);
+function AnimationProvider({ children }: { children: React.ReactNode }) {
+    const [phase, setPhase] = useState(0);
 
     useEffect(() => {
         const interval = setInterval(() => {
-            setPhase(globalPhase);
+            setPhase((p) => (p + 0.05) % (Math.PI * 2));
         }, 50);
         return () => clearInterval(interval);
     }, []);
+
+    return <AnimationContext.Provider value={{ phase }}>{children}</AnimationContext.Provider>;
+}
+
+function useAnimationPhase(): number {
+    return useContext(AnimationContext).phase;
+}
+
+function useGradientColors(): string[] {
+    const phase = useAnimationPhase();
 
     const wave = (Math.sin(phase) + 1) / 2;
     const wave2 = (Math.sin(phase + Math.PI) + 1) / 2;
@@ -83,16 +88,8 @@ function useGradientColors(): string[] {
     return [color1, color2, color3];
 }
 
-// Hook for animated green gradient colors
 function useGreenGradientColors(): string[] {
-    const [phase, setPhase] = useState(globalPhase);
-
-    useEffect(() => {
-        const interval = setInterval(() => {
-            setPhase(globalPhase);
-        }, 50);
-        return () => clearInterval(interval);
-    }, []);
+    const phase = useAnimationPhase();
 
     const wave = (Math.sin(phase) + 1) / 2;
     const wave2 = (Math.sin(phase + Math.PI) + 1) / 2;
@@ -215,6 +212,7 @@ function AccountManager() {
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [logs, setLogs] = useState<string[]>([]);
+    const [errorCount, setErrorCount] = useState(0);
     const [connectedAccounts, setConnectedAccounts] = useState<Set<string>>(new Set());
     const bridge = useTelegramBridge();
     const convex = useConvex();
@@ -246,6 +244,7 @@ function AccountManager() {
             } else if (notification.type === 'new_message') {
                 addLog(`New message in ${notification.peer_id}`);
             } else if (notification.type === 'error') {
+                setErrorCount(prev => prev + 1);
                 addLog(`Error: ${notification.message}`);
             } else if (notification.type === 'sync') {
                 if (notification.saved) {
@@ -254,6 +253,18 @@ function AccountManager() {
             }
         });
         addLog('Started, waiting for messages...');
+    }, [bridge]);
+
+    useEffect(() => {
+        const pingInterval = setInterval(async () => {
+            try {
+                await bridge.ping();
+            } catch {
+                addLog('Backend health check failed');
+            }
+        }, 30000);
+
+        return () => clearInterval(pingInterval);
     }, [bridge]);
 
     const connectAccount = async (accountId: string, sessionString: string) => {
@@ -273,7 +284,11 @@ function AccountManager() {
     };
 
     const loadAccounts = async () => {
-        if (!convex) return;
+        if (!convex) {
+            setError('Database not connected. Check CONVEX_URL.');
+            setLoading(false);
+            return;
+        }
         setLoading(true);
         try {
             const result = await convex.query(api.accounts.list, {});
@@ -309,7 +324,11 @@ function AccountManager() {
     }, [convex]);
 
     const toggleSaveMessages = async () => {
-        if (!convex || accounts.length === 0) return;
+        if (!convex) {
+            setError('Database not connected');
+            return;
+        }
+        if (accounts.length === 0) return;
         const account = accounts[selectedIndex];
         if (!account) return;
         try {
@@ -324,7 +343,11 @@ function AccountManager() {
     };
 
     const toggleFilter = async (filterKey: FilterOption['key']) => {
-        if (!convex || accounts.length === 0) return;
+        if (!convex) {
+            setError('Database not connected');
+            return;
+        }
+        if (accounts.length === 0) return;
         const account = accounts[selectedIndex];
         if (!account) return;
         try {
@@ -457,6 +480,9 @@ function AccountManager() {
                     {' '}{theme.icons.bullet}{' '}
                     {connectedAccounts.size}/{accounts.length} connected
                 </Text>
+                {errorCount > 0 && (
+                    <Text color="red"> {errorCount} errors</Text>
+                )}
             </Box>
 
             {/* Error display */}
@@ -514,8 +540,10 @@ function AccountManager() {
 
 export function App() {
     return (
-        <ConvexProvider>
-            <AccountManager />
-        </ConvexProvider>
+        <AnimationProvider>
+            <ConvexProvider>
+                <AccountManager />
+            </ConvexProvider>
+        </AnimationProvider>
     );
 }

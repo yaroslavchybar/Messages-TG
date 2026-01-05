@@ -1,4 +1,6 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
@@ -9,6 +11,63 @@ import { api } from '../../convex/_generated/api';
 import theme from '../theme';
 
 type Step = 'phone' | 'code' | '2fa' | 'loading' | 'success';
+
+const LOGIN_STATE_FILE = path.join(process.cwd(), '.login_state.json');
+
+type PersistedLoginState = {
+    phone: string;
+    accountId: string;
+    phoneCodeHash: string;
+    step: 'code' | '2fa';
+    timestamp: number;
+};
+
+function saveLoginState(state: PersistedLoginState) {
+    try {
+        fs.writeFileSync(LOGIN_STATE_FILE, JSON.stringify(state), 'utf-8');
+    } catch {
+        return;
+    }
+}
+
+function loadLoginState(): PersistedLoginState | null {
+    try {
+        if (!fs.existsSync(LOGIN_STATE_FILE)) return null;
+        const raw = fs.readFileSync(LOGIN_STATE_FILE, 'utf-8');
+        const data = JSON.parse(raw) as Partial<PersistedLoginState>;
+
+        if (
+            typeof data.phone !== 'string' ||
+            typeof data.accountId !== 'string' ||
+            typeof data.phoneCodeHash !== 'string' ||
+            (data.step !== 'code' && data.step !== '2fa') ||
+            typeof data.timestamp !== 'number'
+        ) {
+            return null;
+        }
+
+        if (Date.now() - data.timestamp >= 5 * 60 * 1000) {
+            try {
+                fs.unlinkSync(LOGIN_STATE_FILE);
+            } catch {
+                return null;
+            }
+            return null;
+        }
+
+        return data as PersistedLoginState;
+    } catch {
+        return null;
+    }
+}
+
+function clearLoginState() {
+    try {
+        fs.unlinkSync(LOGIN_STATE_FILE);
+    } catch {
+        return;
+    }
+}
 
 interface AccountState {
     id: string;
@@ -78,18 +137,40 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
     const [statusText, setStatusText] = useState('');
     const convex = useConvex();
 
+    useEffect(() => {
+        const saved = loadLoginState();
+        if (!saved) return;
+        setPhone(saved.phone);
+        setAccountId(saved.accountId);
+        setPhoneCodeHash(saved.phoneCodeHash);
+        setStep(saved.step);
+    }, []);
+
     const handlePhoneSubmit = useCallback(async () => {
+        if (!convex) {
+            onError('Database not connected. Cannot create account.');
+            return;
+        }
         if (!phone || phone.length < 10) {
             onError('Enter a valid phone with country code');
             return;
         }
 
+        clearLoginState();
+
         setStep('loading');
         setStatusText('Sending verification code...');
 
         try {
-            const convexAccountId = await convex?.mutation(api.accounts.create, { phone });
+            const convexAccountId = await convex.mutation(api.accounts.create, { phone });
             const result = await bridge.login(phone, convexAccountId as string);
+            saveLoginState({
+                phone,
+                accountId: convexAccountId as string,
+                phoneCodeHash: result.phone_code_hash,
+                step: 'code',
+                timestamp: Date.now(),
+            });
             setPhoneCodeHash(result.phone_code_hash);
             setAccountId(convexAccountId as string);
             setStep('code');
@@ -119,6 +200,13 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
             const result = await bridge.verifyCode(accountId, phone, code, phoneCodeHash);
 
             if (result.needs_2fa) {
+                saveLoginState({
+                    phone,
+                    accountId,
+                    phoneCodeHash,
+                    step: '2fa',
+                    timestamp: Date.now(),
+                });
                 setStep('2fa');
                 setStatusText('');
                 return;
@@ -132,6 +220,8 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
                     username: result.username,
                 });
             }
+
+            clearLoginState();
 
             setStep('success');
             setTimeout(() => {
@@ -175,6 +265,8 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
                 });
             }
 
+            clearLoginState();
+
             setStep('success');
             setTimeout(() => {
                 onSuccess({
@@ -192,6 +284,7 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
 
     useInput((input, key) => {
         if (key.escape && onCancel && step !== 'loading') {
+            clearLoginState();
             onCancel();
             return;
         }
