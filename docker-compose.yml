@@ -1,0 +1,8 @@
+services:
+  telegram-tui:
+    image: yaroslavchybar/telegram-tui:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    tty: true
+    stdin_open: true
