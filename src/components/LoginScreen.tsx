@@ -2,9 +2,11 @@ import React, { useState, useCallback } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
+import Gradient from 'ink-gradient';
 import { TelegramBridge } from '../hooks/useTelegramBridge';
 import { useConvex } from '../context/ConvexContext';
 import { api } from '../../convex/_generated/api';
+import theme from '../theme';
 
 type Step = 'phone' | 'code' | '2fa' | 'loading' | 'success';
 
@@ -22,6 +24,50 @@ interface Props {
     onCancel?: () => void;
 }
 
+const STEPS = ['Phone', 'Code', '2FA'];
+
+// Progress indicator component
+function StepIndicator({ currentStep }: { currentStep: Step }) {
+    const stepIndex = currentStep === 'phone' ? 0
+        : currentStep === 'code' ? 1
+            : currentStep === '2fa' ? 2
+                : currentStep === 'success' ? 3
+                    : -1;
+
+    return (
+        <Box marginBottom={1}>
+            {STEPS.map((step, i) => {
+                const isActive = i === stepIndex;
+                const isCompleted = i < stepIndex;
+                return (
+                    <Text key={step}>
+                        <Text color={isActive ? theme.colors.primaryName : isCompleted ? 'green' : 'gray'}>
+                            {isCompleted ? theme.icons.check : isActive ? theme.icons.connected : theme.icons.disconnected}
+                        </Text>
+                        <Text color={isActive ? theme.colors.primaryName : isCompleted ? 'green' : 'gray'}>
+                            {' '}{step}
+                        </Text>
+                        {i < STEPS.length - 1 && (
+                            <Text color="gray"> ─── </Text>
+                        )}
+                    </Text>
+                );
+            })}
+        </Box>
+    );
+}
+
+// Section header with gradient
+function SectionHeader({ title }: { title: string }) {
+    const width = 50;
+    const dashes = '─'.repeat(Math.max(0, width - title.length - 4));
+    return (
+        <Box marginBottom={1}>
+            <Gradient colors={['#FF9D00', '#FFAE00', '#FFC300']}>─ {title} {dashes}</Gradient>
+        </Box>
+    );
+}
+
 export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
     const [step, setStep] = useState<Step>('phone');
     const [phone, setPhone] = useState('');
@@ -34,7 +80,7 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
 
     const handlePhoneSubmit = useCallback(async () => {
         if (!phone || phone.length < 10) {
-            onError('Please enter a valid phone number with country code');
+            onError('Enter a valid phone with country code');
             return;
         }
 
@@ -42,12 +88,8 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
         setStatusText('Sending verification code...');
 
         try {
-            // Create or get account in Convex
             const convexAccountId = await convex?.mutation(api.accounts.create, { phone });
-
-            // Start Telegram login
             const result = await bridge.login(phone, convexAccountId as string);
-
             setPhoneCodeHash(result.phone_code_hash);
             setAccountId(convexAccountId as string);
             setStep('code');
@@ -60,12 +102,12 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
 
     const handleCodeSubmit = useCallback(async () => {
         if (!code || code.length < 5) {
-            onError('Please enter a valid verification code');
+            onError('Enter a valid verification code');
             return;
         }
 
         if (!phoneCodeHash || !accountId) {
-            onError('Session expired, please try again');
+            onError('Session expired, try again');
             setStep('phone');
             return;
         }
@@ -82,7 +124,6 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
                 return;
             }
 
-            // Update session in Convex
             if (convex && result.session_string) {
                 await convex.mutation(api.accounts.updateSession, {
                     accountId: accountId as any,
@@ -109,12 +150,12 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
 
     const handle2FASubmit = useCallback(async () => {
         if (!password) {
-            onError('Please enter your 2FA password');
+            onError('Enter your 2FA password');
             return;
         }
 
         if (!phoneCodeHash || !accountId) {
-            onError('Session expired, please try again');
+            onError('Session expired, try again');
             setStep('phone');
             return;
         }
@@ -125,7 +166,6 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
         try {
             const result = await bridge.verifyCode(accountId, phone, code, phoneCodeHash, password);
 
-            // Update session in Convex
             if (convex && result.session_string) {
                 await convex.mutation(api.accounts.updateSession, {
                     accountId: accountId as any,
@@ -164,18 +204,22 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
 
     return (
         <Box flexDirection="column">
+            {/* Header */}
             <Box marginBottom={1}>
-                <Text bold>🔐 Login to Telegram</Text>
+                <Text bold color={theme.colors.primaryName}>Login to Telegram</Text>
             </Box>
+
+            {/* Progress indicator */}
+            {step !== 'loading' && step !== 'success' && (
+                <StepIndicator currentStep={step} />
+            )}
 
             {/* Phone input */}
             {step === 'phone' && (
                 <Box flexDirection="column">
+                    <SectionHeader title="Phone Number" />
                     <Box>
-                        <Text>Phone number (with country code): </Text>
-                    </Box>
-                    <Box marginTop={1}>
-                        <Text color="cyan">+</Text>
+                        <Text color={theme.colors.primaryName}>+ </Text>
                         <TextInput
                             value={phone}
                             onChange={setPhone}
@@ -183,69 +227,68 @@ export function LoginScreen({ bridge, onSuccess, onError, onCancel }: Props) {
                         />
                     </Box>
                     <Box marginTop={1}>
-                        <Text dimColor>Press Enter to continue</Text>
+                        <Text color="gray">Include country code (e.g., 1 for US)</Text>
                     </Box>
                 </Box>
             )}
 
-            {/* Verification code input */}
+            {/* Code input */}
             {step === 'code' && (
                 <Box flexDirection="column">
+                    <Box marginBottom={1}>
+                        <Text color="green">{theme.icons.check} Code sent to +{phone}</Text>
+                    </Box>
+                    <SectionHeader title="Verification Code" />
                     <Box>
-                        <Text color="green">✓ Code sent to {phone}</Text>
-                    </Box>
-                    <Box marginTop={1}>
-                        <Text>Verification code: </Text>
-                    </Box>
-                    <Box marginTop={1}>
                         <TextInput
                             value={code}
                             onChange={setCode}
                             placeholder="12345"
                         />
                     </Box>
-                    <Box marginTop={1}>
-                        <Text dimColor>Press Enter to verify</Text>
-                    </Box>
                 </Box>
             )}
 
-            {/* 2FA password input */}
+            {/* 2FA input */}
             {step === '2fa' && (
                 <Box flexDirection="column">
+                    <Box marginBottom={1}>
+                        <Text color="yellow">Two-factor authentication required</Text>
+                    </Box>
+                    <SectionHeader title="2FA Password" />
                     <Box>
-                        <Text color="yellow">⚠ Two-factor authentication required</Text>
-                    </Box>
-                    <Box marginTop={1}>
-                        <Text>2FA Password: </Text>
-                    </Box>
-                    <Box marginTop={1}>
                         <TextInput
                             value={password}
                             onChange={setPassword}
                             mask="*"
                         />
                     </Box>
-                    <Box marginTop={1}>
-                        <Text dimColor>Press Enter to continue</Text>
-                    </Box>
                 </Box>
             )}
 
-            {/* Loading state */}
+            {/* Loading */}
             {step === 'loading' && (
-                <Box marginTop={1}>
-                    <Text color="cyan">
+                <Box>
+                    <Text color={theme.colors.primaryName}>
                         <Spinner type="dots" />
                     </Text>
                     <Text> {statusText}</Text>
                 </Box>
             )}
 
-            {/* Success state */}
+            {/* Success */}
             {step === 'success' && (
-                <Box marginTop={1}>
-                    <Text color="green">✓ Login successful! Loading conversations...</Text>
+                <Box>
+                    <Text color="green">{theme.icons.check} Login successful!</Text>
+                </Box>
+            )}
+
+            {/* Footer */}
+            {step !== 'loading' && step !== 'success' && (
+                <Box marginTop={2}>
+                    <Text color="gray">
+                        enter to continue {theme.icons.bullet} esc to cancel
+                    </Text>
                 </Box>
             )}
         </Box>

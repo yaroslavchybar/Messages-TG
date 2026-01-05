@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
+import Gradient from 'ink-gradient';
 import { LoginScreen } from './LoginScreen';
 import { useTelegramBridge } from '../hooks/useTelegramBridge';
 import { ConvexProvider, useConvex } from '../context/ConvexContext';
 import { api } from '../../convex/_generated/api';
+import theme from '../theme';
 
 type Screen = 'accounts' | 'login' | 'filters';
 
@@ -29,13 +31,174 @@ interface FilterOption {
 }
 
 const FILTER_OPTIONS: FilterOption[] = [
-    { key: 'saveFromChannels', label: 'Channels', icon: '📢' },
-    { key: 'saveFromBots', label: 'Bots', icon: '🤖' },
-    { key: 'saveFromPrivate', label: 'Private Users', icon: '👤' },
-    { key: 'saveFromGroups', label: 'Groups', icon: '👥' },
+    { key: 'saveFromChannels', label: 'Channels', icon: '' },
+    { key: 'saveFromBots', label: 'Bots', icon: '' },
+    { key: 'saveFromPrivate', label: 'Private', icon: '' },
+    { key: 'saveFromGroups', label: 'Groups', icon: '' },
 ];
 
-const MAX_LOGS = 8;
+const MAX_LOGS = 6;
+const CONTENT_WIDTH = 70;
+
+// Hex color interpolation helper
+function interpolateColor(color1: string, color2: string, factor: number): string {
+    const r1 = parseInt(color1.slice(1, 3), 16);
+    const g1 = parseInt(color1.slice(3, 5), 16);
+    const b1 = parseInt(color1.slice(5, 7), 16);
+    const r2 = parseInt(color2.slice(1, 3), 16);
+    const g2 = parseInt(color2.slice(3, 5), 16);
+    const b2 = parseInt(color2.slice(5, 7), 16);
+
+    const r = Math.round(r1 + (r2 - r1) * factor);
+    const g = Math.round(g1 + (g2 - g1) * factor);
+    const b = Math.round(b1 + (b2 - b1) * factor);
+
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+// Shared animation phase for synchronized gradient animation
+let globalPhase = 0;
+setInterval(() => {
+    globalPhase = (globalPhase + 0.05) % (Math.PI * 2);
+}, 50);
+
+// Hook for animated gradient colors
+function useGradientColors(): string[] {
+    const [phase, setPhase] = useState(globalPhase);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setPhase(globalPhase);
+        }, 50);
+        return () => clearInterval(interval);
+    }, []);
+
+    const wave = (Math.sin(phase) + 1) / 2;
+    const wave2 = (Math.sin(phase + Math.PI) + 1) / 2;
+
+    const color1 = interpolateColor('#FF9D00', '#FFAE00', wave);
+    const color2 = interpolateColor('#FFAE00', '#FFC300', wave);
+    const color3 = interpolateColor('#FFC300', '#FF9D00', wave2);
+
+    return [color1, color2, color3];
+}
+
+// Hook for animated green gradient colors
+function useGreenGradientColors(): string[] {
+    const [phase, setPhase] = useState(globalPhase);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setPhase(globalPhase);
+        }, 50);
+        return () => clearInterval(interval);
+    }, []);
+
+    const wave = (Math.sin(phase) + 1) / 2;
+    const wave2 = (Math.sin(phase + Math.PI) + 1) / 2;
+
+    const color1 = interpolateColor('#00B003', '#4AD84C', wave);
+    const color2 = interpolateColor('#4AD84C', '#8AFF8C', wave);
+    const color3 = interpolateColor('#8AFF8C', '#00B003', wave2);
+
+    return [color1, color2, color3];
+}
+
+// Reusable animated gradient text component (orange)
+function GradientText({ children, bold }: { children: React.ReactNode; bold?: boolean }) {
+    const colors = useGradientColors();
+    return <Gradient colors={colors}>{children}</Gradient>;
+}
+
+// Reusable animated green gradient text component
+function GreenGradientText({ children }: { children: React.ReactNode }) {
+    const colors = useGreenGradientColors();
+    return <Gradient colors={colors}>{children}</Gradient>;
+}
+
+// Animated gradient section header with smooth wave effect
+function SectionHeader({ title }: { title: string }) {
+    const colors = useGradientColors();
+    const dashes = '─'.repeat(Math.max(0, CONTENT_WIDTH - title.length - 4));
+
+    return (
+        <Gradient colors={colors}>
+            ─ {title} {dashes}
+        </Gradient>
+    );
+}
+
+// Account card component
+function AccountCard({
+    account,
+    isSelected,
+    isConnected
+}: {
+    account: AccountInfo;
+    isSelected: boolean;
+    isConnected: boolean;
+}) {
+    const activeFilters = FILTER_OPTIONS.filter(o => account[o.key]).length;
+
+    return (
+        <Box flexDirection="column" marginLeft={1}>
+            <Box>
+                {isSelected ? (
+                    <GradientText>{'> '}</GradientText>
+                ) : (
+                    <Text>{'  '}</Text>
+                )}
+                {isConnected ? (
+                    <GreenGradientText>{theme.icons.connected}</GreenGradientText>
+                ) : (
+                    <Text color="gray">{theme.icons.disconnected}</Text>
+                )}
+                {isSelected ? (
+                    <GradientText>{' '}{account.name || 'Unknown'}</GradientText>
+                ) : (
+                    <Text bold color="white">{' '}{account.name || 'Unknown'}</Text>
+                )}
+                {account.username && (
+                    <Text color="gray"> @{account.username}</Text>
+                )}
+            </Box>
+            <Box marginLeft={4}>
+                <Text color="gray">
+                    {account.phone}
+                    {' '}{theme.icons.bullet}{' '}
+                    {account.saveMessages ? (
+                        <GreenGradientText>Saving</GreenGradientText>
+                    ) : (
+                        <Text color="gray">Paused</Text>
+                    )}
+                    {' '}{theme.icons.bullet}{' '}
+                    Filters: {activeFilters}/{FILTER_OPTIONS.length}
+                </Text>
+            </Box>
+        </Box>
+    );
+}
+
+// Log entry colored by position: first=orange, last=green, middle=gray
+function LogEntry({ log, isFirst, isLast }: { log: string; isFirst: boolean; isLast: boolean }) {
+    if (isLast) {
+        return <GreenGradientText>{log}</GreenGradientText>;
+    } else if (isFirst) {
+        return <GradientText>{log}</GradientText>;
+    }
+    return <Text color="gray" wrap="truncate">{log}</Text>;
+}
+
+// Footer with keyboard hints  
+function Footer() {
+    return (
+        <Box marginTop={1}>
+            <Text color="gray">
+                ↑↓ navigate {theme.icons.bullet} a add {theme.icons.bullet} s save {theme.icons.bullet} f filters {theme.icons.bullet} r refresh {theme.icons.bullet} q quit
+            </Text>
+        </Box>
+    );
+}
 
 const stripEmojis = (input: string) =>
     input
@@ -57,30 +220,25 @@ function AccountManager() {
     const convex = useConvex();
     const { exit } = useApp();
 
-    // Add log entry
     const addLog = (message: string) => {
         const cleanedMessage = stripEmojis(message);
-        const timestamp = new Date().toLocaleTimeString();
-        setLogs(prev => [...prev.slice(-(MAX_LOGS - 1)), `[${timestamp}] ${cleanedMessage}`]);
+        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        setLogs(prev => [...prev.slice(-(MAX_LOGS - 1)), `${timestamp}  ${cleanedMessage}`]);
     };
 
-    // Handle Ctrl+C
     useEffect(() => {
         const handleExit = () => {
             bridge.cleanup();
             exit();
         };
-
         process.on('SIGINT', handleExit);
         process.on('SIGTERM', handleExit);
-
         return () => {
             process.off('SIGINT', handleExit);
             process.off('SIGTERM', handleExit);
         };
     }, [bridge, exit]);
 
-    // Set up notification listener for logs
     useEffect(() => {
         bridge.onNotification((notification: any) => {
             if (notification.type === 'log') {
@@ -95,28 +253,25 @@ function AccountManager() {
                 }
             }
         });
-        addLog('TUI started, waiting for messages...');
+        addLog('Started, waiting for messages...');
     }, [bridge]);
 
-    // Connect account using session
     const connectAccount = async (accountId: string, sessionString: string) => {
         if (connectedAccounts.has(accountId)) return;
-
         try {
-            addLog(`Connecting account ${accountId.slice(0, 8)}...`);
+            addLog(`Connecting ${accountId.slice(0, 8)}...`);
             const result = await bridge.connectWithSession(accountId, sessionString);
             if (result.success) {
                 setConnectedAccounts(prev => new Set([...prev, accountId]));
                 addLog(`Connected: ${result.name || 'Account'}`);
             } else {
-                addLog(`Failed to connect: ${result.error}`);
+                addLog(`Failed: ${result.error}`);
             }
         } catch (e: any) {
-            addLog(`Connection error: ${e.message}`);
+            addLog(`Error: ${e.message}`);
         }
     };
 
-    // Load accounts from Convex
     const loadAccounts = async () => {
         if (!convex) return;
         setLoading(true);
@@ -137,11 +292,8 @@ function AccountManager() {
                 connected: connectedAccounts.has(a._id),
             }));
             setAccounts(accountList);
-
-            // Auto-connect accounts that have session strings
             for (const account of accountList) {
                 if (account.sessionString && !connectedAccounts.has(account.id)) {
-                    // Connect in background
                     connectAccount(account.id, account.sessionString);
                 }
             }
@@ -156,36 +308,30 @@ function AccountManager() {
         loadAccounts();
     }, [convex]);
 
-    // Toggle save messages for selected account
     const toggleSaveMessages = async () => {
         if (!convex || accounts.length === 0) return;
         const account = accounts[selectedIndex];
         if (!account) return;
-
         try {
             await convex.mutation(api.accounts.updateSaveMessages, {
                 accountId: account.id as any,
                 saveMessages: !account.saveMessages,
             });
-            // Refresh accounts
             await loadAccounts();
         } catch (e: any) {
-            setError(e.message || 'Failed to update setting');
+            setError(e.message || 'Failed to update');
         }
     };
 
-    // Toggle a specific filter for selected account
     const toggleFilter = async (filterKey: FilterOption['key']) => {
         if (!convex || accounts.length === 0) return;
         const account = accounts[selectedIndex];
         if (!account) return;
-
         try {
             await convex.mutation(api.accounts.updateMessageFilters, {
                 accountId: account.id as any,
                 [filterKey]: !account[filterKey],
             });
-            // Refresh accounts
             await loadAccounts();
         } catch (e: any) {
             setError(e.message || 'Failed to update filter');
@@ -193,7 +339,6 @@ function AccountManager() {
     };
 
     useInput((input, key) => {
-        // Filter screen controls
         if (screen === 'filters') {
             if (key.escape || input === 'b') {
                 setScreen('accounts');
@@ -211,7 +356,6 @@ function AccountManager() {
             return;
         }
 
-        // Accounts screen controls
         if (screen !== 'accounts') return;
 
         if (key.upArrow && accounts.length > 0) {
@@ -219,18 +363,14 @@ function AccountManager() {
         } else if (key.downArrow && accounts.length > 0) {
             setSelectedIndex((i) => Math.min(accounts.length - 1, i + 1));
         } else if (input === 'a') {
-            // Add new account
             setScreen('login');
         } else if (input === 's' && accounts.length > 0) {
-            // Toggle save messages
             toggleSaveMessages();
         } else if (input === 'f' && accounts.length > 0) {
-            // Open filter settings
             setScreen('filters');
         } else if (input === 'c') {
             setLogs([]);
         } else if (input === 'r') {
-            // Refresh accounts
             loadAccounts();
         } else if (input === 'q') {
             bridge.cleanup();
@@ -248,18 +388,12 @@ function AccountManager() {
     if (screen === 'login') {
         return (
             <Box flexDirection="column" padding={1}>
-                <Box marginBottom={1} borderStyle="round" borderColor="cyan" paddingX={2}>
-                    <Text bold color="cyan">📱 Telegram Account Manager</Text>
-                </Box>
                 <LoginScreen
                     bridge={bridge}
                     onSuccess={handleLoginSuccess}
                     onError={setError}
                     onCancel={() => setScreen('accounts')}
                 />
-                <Box marginTop={1}>
-                    <Text dimColor>Press Esc to cancel</Text>
-                </Box>
             </Box>
         );
     }
@@ -275,59 +409,38 @@ function AccountManager() {
         return (
             <Box flexDirection="column" padding={1}>
                 {/* Header */}
-                <Box marginBottom={1} borderStyle="round" borderColor="cyan" paddingX={2}>
-                    <Text bold color="cyan">🔧 Message Filters</Text>
-                    <Text color="gray"> - {account.name || account.phone}</Text>
-                </Box>
-
-                {/* Error display */}
-                {error && (
-                    <Box marginBottom={1}>
-                        <Text color="red">⚠ {error}</Text>
-                    </Box>
-                )}
-
-                {/* Description */}
                 <Box marginBottom={1}>
-                    <Text>Select which message sources to save:</Text>
+                    <GradientText>Message Filters</GradientText>
+                    <Text color="gray"> {theme.icons.bullet} {account.name || account.phone}</Text>
                 </Box>
 
                 {/* Filter options */}
                 <Box flexDirection="column" marginBottom={1}>
-                    {FILTER_OPTIONS.map((option, i) => {
-                        const isSelected = i === filterIndex;
-                        const isEnabled = account[option.key];
-                        return (
-                            <Box key={option.key} paddingX={1}>
-                                <Text
-                                    backgroundColor={isSelected ? 'blue' : undefined}
-                                    color={isSelected ? 'white' : undefined}
-                                >
-                                    {isSelected ? '▶ ' : '  '}
-                                    <Text>{option.icon} </Text>
-                                    <Text bold>{option.label}</Text>
-                                    <Text>  </Text>
-                                    <Text color={isEnabled ? 'green' : 'red'}>
-                                        [{isEnabled ? '✓ ON' : '✗ OFF'}]
+                    <SectionHeader title="Sources" />
+                    <Box flexDirection="column" marginTop={1}>
+                        {FILTER_OPTIONS.map((option, i) => {
+                            const isSelected = i === filterIndex;
+                            const isEnabled = account[option.key];
+                            return (
+                                <Box key={option.key} marginLeft={1}>
+                                    {isSelected ? (
+                                        <GradientText>{'> '}{option.icon} {option.label}</GradientText>
+                                    ) : (
+                                        <Text>{'  '}{option.icon} {option.label}</Text>
+                                    )}
+                                    <Text color={isEnabled ? 'green' : 'gray'}>
+                                        {' '}{isEnabled ? theme.icons.check : theme.icons.cross}
                                     </Text>
-                                </Text>
-                            </Box>
-                        );
-                    })}
+                                </Box>
+                            );
+                        })}
+                    </Box>
                 </Box>
 
-                {/* Summary */}
-                <Box marginTop={1} paddingX={1}>
-                    <Text dimColor>
-                        Active filters: {' '}
-                        {FILTER_OPTIONS.filter(o => account[o.key]).map(o => o.label).join(', ') || 'None'}
-                    </Text>
-                </Box>
-
-                {/* Footer with controls */}
-                <Box marginTop={1} borderStyle="single" borderColor="gray" paddingX={1}>
-                    <Text dimColor>
-                        ↑↓ navigate • Enter/Space toggle • Esc back • q quit
+                {/* Footer */}
+                <Box marginTop={1}>
+                    <Text color="gray">
+                        ↑↓ navigate {theme.icons.bullet} enter toggle {theme.icons.bullet} esc back {theme.icons.bullet} q quit
                     </Text>
                 </Box>
             </Box>
@@ -338,79 +451,63 @@ function AccountManager() {
     return (
         <Box flexDirection="column" padding={1}>
             {/* Header */}
-            <Box marginBottom={1} borderStyle="round" borderColor="cyan" paddingX={2}>
-                <Text bold color="cyan">📱 Telegram Account Manager</Text>
+            <Box marginBottom={1}>
+                <GradientText>Telegram Manager</GradientText>
+                <Text color="gray">
+                    {' '}{theme.icons.bullet}{' '}
+                    {connectedAccounts.size}/{accounts.length} connected
+                </Text>
             </Box>
 
             {/* Error display */}
             {error && (
                 <Box marginBottom={1}>
-                    <Text color="red">⚠ {error}</Text>
+                    <Text color="red">{theme.icons.cross} {error}</Text>
                 </Box>
             )}
 
-            {/* Accounts list */}
+            {/* Accounts section */}
             <Box flexDirection="column" marginBottom={1}>
-                <Text bold>Accounts ({accounts.length}):</Text>
+                <SectionHeader title="Accounts" />
                 <Box marginTop={1} flexDirection="column">
                     {loading ? (
-                        <Text dimColor>Loading accounts...</Text>
+                        <Text color="gray">Loading...</Text>
                     ) : accounts.length === 0 ? (
-                        <Text dimColor>No accounts yet. Press 'a' to add one.</Text>
+                        <Text color="gray">No accounts. Press 'a' to add.</Text>
                     ) : (
-                        accounts.map((account, i) => {
-                            const isSelected = i === selectedIndex;
-                            const activeFilters = FILTER_OPTIONS.filter(o => account[o.key]).length;
-                            const isConnected = connectedAccounts.has(account.id);
-                            return (
-                                <Box key={account.id} paddingX={1}>
-                                    <Text
-                                        backgroundColor={isSelected ? 'blue' : undefined}
-                                        color={isSelected ? 'white' : undefined}
-                                    >
-                                        {isSelected ? '▶ ' : '  '}
-                                        <Text color={isConnected ? 'green' : 'yellow'}>
-                                            {isConnected ? '🔗' : '⚪'}
-                                        </Text>
-                                        <Text bold> {account.name || account.phone}</Text>
-                                        {account.username && (
-                                            <Text dimColor={!isSelected}> @{account.username}</Text>
-                                        )}
-                                        <Text dimColor={!isSelected}> ({account.phone})</Text>
-                                        <Text color={account.saveMessages ? 'green' : 'red'}>
-                                            {' '}[Save: {account.saveMessages ? 'ON' : 'OFF'}]
-                                        </Text>
-                                        <Text dimColor={!isSelected}>
-                                            {' '}[Filters: {activeFilters}/{FILTER_OPTIONS.length}]
-                                        </Text>
-                                    </Text>
-                                </Box>
-                            );
-                        })
-                    )}
-                </Box>
-            </Box>
-
-            {/* Logs panel */}
-            <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor="gray" paddingX={1}>
-                <Text bold dimColor>📋 Logs:</Text>
-                <Box flexDirection="column" height={MAX_LOGS}>
-                    {logs.length === 0 ? (
-                        <Text dimColor>No activity yet...</Text>
-                    ) : (
-                        logs.map((log, i) => (
-                            <Text key={i} dimColor wrap="truncate">{log}</Text>
+                        accounts.map((account, i) => (
+                            <AccountCard
+                                key={account.id}
+                                account={account}
+                                isSelected={i === selectedIndex}
+                                isConnected={connectedAccounts.has(account.id)}
+                            />
                         ))
                     )}
                 </Box>
             </Box>
 
-            {/* Footer with controls */}
-            <Box marginTop={1} borderStyle="single" borderColor="gray" paddingX={1}>
-                <Text dimColor>
-                    ↑↓ navigate • a add • s toggle save • f filters • c clear logs • r refresh • q quit
-                </Text>
+            {/* Logs section */}
+            <Box flexDirection="column" marginTop={1}>
+                <SectionHeader title="Activity" />
+                <Box flexDirection="column" marginTop={1} marginLeft={1} height={MAX_LOGS}>
+                    {logs.length === 0 ? (
+                        <Text color="gray">No activity yet...</Text>
+                    ) : (
+                        logs.map((log, i) => (
+                            <LogEntry
+                                key={i}
+                                log={log}
+                                isFirst={i === 0}
+                                isLast={i === logs.length - 1}
+                            />
+                        ))
+                    )}
+                </Box>
             </Box>
+
+            {/* Footer */}
+            <Footer />
         </Box>
     );
 }
