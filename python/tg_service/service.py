@@ -10,7 +10,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import User
 
-from .convex_sync import sync_message
+from .convex_sync import sync_messages
 from .dialogs import fetch_messages as fetch_messages_impl
 from .dialogs import get_dialogs as get_dialogs_impl
 from .handlers import register_handlers
@@ -30,7 +30,7 @@ class TelegramService:
         self.pending_logins: dict[str, dict] = {}
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(20.0),
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            limits=httpx.Limits(max_keepalive_connections=50, max_connections=100, keepalive_expiry=30.0),
         )
         self._sync_queue: asyncio.Queue[dict] | None = None
         self._sync_worker_tasks: set[asyncio.Task] = set()
@@ -299,8 +299,29 @@ class TelegramService:
             item = await self._sync_queue.get()
             if item is None:
                 return
+
+            batch: list[dict] = [item]
+            start = time.monotonic()
+            max_batch_size = 50
+            max_wait_s = 0.1
+
+            while len(batch) < max_batch_size and (time.monotonic() - start) < max_wait_s:
+                try:
+                    nxt = self._sync_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                if nxt is None:
+                    try:
+                        self._sync_queue.put_nowait(None)
+                    except asyncio.QueueFull:
+                        await self._sync_queue.put(None)
+                    break
+                batch.append(nxt)
+
             try:
-                await self._sync_message(**item)
+                await self._sync_messages(batch)
             except Exception as e:
                 self._write_notification({
                     "type": "error",
@@ -470,13 +491,16 @@ class TelegramService:
             return {"success": True}
         return {"success": False, "error": "Client not found"}
 
-    async def _sync_message(self, **kwargs) -> None:
-        await sync_message(
+    async def _sync_messages(self, messages: list[dict]) -> None:
+        await sync_messages(
             convex_url=self.convex_url,
             http_client=self.http_client,
             notify=self._write_notification,
-            **kwargs,
+            messages=messages,
         )
+
+    async def _sync_message(self, **kwargs) -> None:
+        await self._sync_messages([kwargs])
 
     def _write_notification(self, notification: dict):
         write_notification(notification)

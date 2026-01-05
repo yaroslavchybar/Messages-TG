@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from 'react';
+import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import Gradient from 'ink-gradient';
 import { LoginScreen } from './LoginScreen';
@@ -56,19 +56,42 @@ function interpolateColor(color1: string, color2: string, factor: number): strin
     return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
-const AnimationContext = createContext<{ phase: number }>({ phase: 0 });
+const AnimationContext = createContext<{ phase: number; notifyActivity: (durationMs?: number) => void }>({
+    phase: 0,
+    notifyActivity: () => {},
+});
 
 function AnimationProvider({ children }: { children: React.ReactNode }) {
     const [phase, setPhase] = useState(0);
+    const [active, setActive] = useState(true);
+    const activeUntilRef = useRef(Date.now() + 2000);
 
-    useEffect(() => {
-        const interval = setInterval(() => {
-            setPhase((p) => (p + 0.05) % (Math.PI * 2));
-        }, 50);
-        return () => clearInterval(interval);
+    const notifyActivity = useCallback((durationMs: number = 3000) => {
+        const until = Date.now() + durationMs;
+        if (until > activeUntilRef.current) {
+            activeUntilRef.current = until;
+        }
+        setActive(true);
     }, []);
 
-    return <AnimationContext.Provider value={{ phase }}>{children}</AnimationContext.Provider>;
+    useEffect(() => {
+        if (!active) return;
+
+        const interval = setInterval(() => {
+            if (Date.now() > activeUntilRef.current) {
+                setActive(false);
+                return;
+            }
+            setPhase((p) => (p + 0.1) % (Math.PI * 2));
+        }, 100);
+        return () => clearInterval(interval);
+    }, [active]);
+
+    return (
+        <AnimationContext.Provider value={{ phase, notifyActivity }}>
+            {children}
+        </AnimationContext.Provider>
+    );
 }
 
 function useAnimationPhase(): number {
@@ -217,8 +240,10 @@ function AccountManager() {
     const bridge = useTelegramBridge();
     const convex = useConvex();
     const { exit } = useApp();
+    const { notifyActivity } = useContext(AnimationContext);
 
     const addLog = (message: string) => {
+        notifyActivity(5000);
         const cleanedMessage = stripEmojis(message);
         const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         setLogs(prev => [...prev.slice(-(MAX_LOGS - 1)), `${timestamp}  ${cleanedMessage}`]);
@@ -362,6 +387,7 @@ function AccountManager() {
     };
 
     useInput((input, key) => {
+        notifyActivity();
         if (screen === 'filters') {
             if (key.escape || input === 'b') {
                 setScreen('accounts');
